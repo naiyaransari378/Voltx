@@ -1,0 +1,89 @@
+name: Build VaultX (APK + AAB)
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Prepare signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          KS="$RUNNER_TEMP/release.jks"
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "Using signing key from repository secrets"
+            echo "$KEYSTORE_BASE64" | base64 --decode > "$KS"
+            {
+              echo "KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD"
+              echo "KEY_ALIAS=$KEY_ALIAS"
+              echo "KEY_PASSWORD=$KEY_PASSWORD"
+            } >> "$GITHUB_ENV"
+          else
+            echo "::warning::No signing secrets set – using a temporary key. Add secrets so users can install updates over old versions."
+            keytool -genkeypair -v -keystore "$KS" -storetype PKCS12 \
+              -storepass vaultx-temp -keypass vaultx-temp -alias vaultx \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=VaultX, OU=Mobile, O=VaultX, C=US"
+            {
+              echo "KEYSTORE_PASSWORD=vaultx-temp"
+              echo "KEY_ALIAS=vaultx"
+              echo "KEY_PASSWORD=vaultx-temp"
+            } >> "$GITHUB_ENV"
+          fi
+          echo "KEYSTORE_PATH=$KS" >> "$GITHUB_ENV"
+
+      - name: Build signed APK and AAB
+        env:
+          VERSION_CODE: ${{ github.run_number }}
+        run: gradle --no-daemon --stacktrace assembleRelease bundleRelease
+
+      - name: Collect outputs
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/release/*.apk "dist/VaultX-${{ github.run_number }}.apk"
+          cp app/build/outputs/bundle/release/*.aab "dist/VaultX-${{ github.run_number }}.aab"
+          ls -la dist
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: VaultX-APK
+          path: dist/*.apk
+
+      - name: Upload AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: VaultX-AAB
+          path: dist/*.aab
+
+      - name: Publish GitHub Release (on tags like v1.0.0)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
